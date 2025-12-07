@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<title>Aid Ship Runner — Tek Dosya Prototip</title>
+<style>
+  html,body { height:100%; margin:0; background:#87CEEB; -webkit-touch-callout:none; -webkit-user-select:none; -ms-user-select:none; user-select:none; }
+  #gameCanvas { display:block; margin:0 auto; background: linear-gradient(#87CEEB,#cfeef8 60%, #a6e0ff 100%); width:100%; height:100vh; touch-action:none; }
+  .ui {
+    position: absolute; left: 12px; top: 12px; z-index: 10;
+    font-family: Inter, system-ui, -apple-system, "Helvetica Neue", Arial;
+    color: #05324a; text-shadow: 0 1px 0 rgba(255,255,255,0.6);
+  }
+  .center-ui { position: absolute; left:50%; transform: translateX(-50%); top:18px; text-align:center; z-index:10; }
+  .big { font-size:20px; font-weight:700; }
+  .small { font-size:14px; }
+  #overlay {
+    position: absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    background: rgba(0,0,0,0.55); color: #fff; padding:18px; border-radius:12px; z-index: 20; display:none;
+    text-align:center; width:85%;
+  }
+  button { font-size:16px; padding:10px 14px; border-radius:8px; border:none; background:#1e90ff; color:white; }
+  footer { position: absolute; bottom:8px; left:12px; font-size:12px; color:#034; opacity:0.8; }
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+
+<div class="ui center-ui">
+  <div id="scoreDisplay" class="big">Skor: 0</div>
+  <div id="subScore" class="small">Engeller: 0 · Açık Deniz: 0</div>
+</div>
+
+<div class="ui" style="right:12px; left:auto; top:12px; text-align:right;">
+  <div class="small">Seviye Hızı: <span id="speedDisplay">1.0x</span></div>
+  <div style="height:6px"></div>
+  <button id="muteBtn">Ses Kapalı</button>
+</div>
+
+<div id="overlay">
+  <div id="overlayText" style="font-size:18px; font-weight:700;">Aid Ship Runner</div>
+  <div style="height:10px"></div>
+  <div style="font-size:14px; margin-bottom:12px;">Ekrana dokun veya boşluk tuşuna bas — gemiyi yukarı çek.</div>
+  <div style="display:flex; gap:10px; justify-content:center;">
+    <button id="startBtn">Başla</button>
+    <button id="resetBtn" style="background:#ff6b6b">Yeniden</button>
+  </div>
+  <div style="height:8px"></div>
+  <div style="font-size:12px; opacity:0.9;">Her 50 toprak engelinden sonra açık deniz. Açık denizde bonus engeller çıkıyor.</div>
+</div>
+
+<footer>Prototip — Mobil için optimize edildi. (Dokunmatik / boşluk)</footer>
+
+<script>
+(() => {
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  let W = canvas.width = innerWidth;
+  let H = canvas.height = innerHeight;
+
+  const scoreDisplay = document.getElementById('scoreDisplay');
+  const subScore = document.getElementById('subScore');
+  const speedDisplay = document.getElementById('speedDisplay');
+  const overlay = document.getElementById('overlay');
+  const overlayText = document.getElementById('overlayText');
+  const startBtn = document.getElementById('startBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const muteBtn = document.getElementById('muteBtn');
+
+  // Game state
+  let running = false;
+  let gameOver = false;
+  let lastTime = 0;
+  let dt = 0;
+  let gravity = 1400; // px/s^2
+  let touchImpulse = -420; // px/s immediate velocity set
+  let ship = {
+    x: W * 0.18,
+    y: H * 0.5,
+    vy: 0,
+    radius: Math.min(28, H*0.045),
+  };
+
+  // Obstacles
+  const obstacles = [];
+  const OB_WIDTH = Math.max(60, W*0.08);
+  let gapHeight = Math.max(150, H*0.20);
+  let scrollSpeedBase = Math.max(200, W * 0.18); // px/s base speed of obstacles
+  let speedMultiplier = 1;
+  let spawnTimer = 0;
+  let spawnInterval = 1.35; // seconds between obstacle sets
+  let passedObstacles = 0; // total passed soil obstacles
+  let openSeaCount = 0;
+  let inOpenSea = false;
+  let openSeaTimer = 0;
+  const OPEN_SEA_DURATION = 6.0; // seconds for open-sea (can be tuned)
+  let bestScore = Number(localStorage.getItem('asr_best') || 0);
+  let score = 0;
+  let totalSoilPassed = 0;
+
+  // audio
+  let audioCtx = null;
+  let audioOn = false;
+
+  function initAudio() {
+    if (audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+
+  function playBeep(freq = 440, time=0.05) {
+    if(!audioOn) return;
+    if(!audioCtx) initAudio();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = 'sine';
+    o.frequency.value = freq;
+    g.gain.value = 0.08;
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start();
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + time);
+    o.stop(audioCtx.currentTime + time + 0.02);
+  }
+
+  function playCrash() {
+    if(!audioOn) return;
+    if(!audioCtx) initAudio();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = 'square';
+    o.frequency.value = 120;
+    g.gain.value = 0.2;
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start();
+    o.frequency.exponentialRampToValueAtTime(30, audioCtx.currentTime + 0.25);
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.3);
+    o.stop(audioCtx.currentTime + 0.35);
+  }
+
+  muteBtn.addEventListener('click', () => {
+    audioOn = !audioOn;
+    muteBtn.textContent = audioOn ? 'Ses Açık' : 'Ses Kapalı';
+    if (audioOn) initAudio();
+  });
+
+  // responsiveness
+  function resize() {
+    W = canvas.width = innerWidth;
+    H = canvas.height = innerHeight;
+    ship.x = W * 0.18;
+    ship.radius = Math.min(28, H*0.045);
+    gapHeight = Math.max(140, H*0.20);
+    scrollSpeedBase = Math.max(200, W * 0.18);
+  }
+  addEventListener('resize', resize);
+
+  // input
+  let pointerDown = false;
+  function beginTouch() {
+    pointerDown = true;
+    if (!running) startGame();
+    // apply vertical impulse
+    ship.vy = touchImpulse;
+    playBeep(880, 0.03);
+  }
+  function endTouch() {
+    pointerDown = false;
+  }
+  canvas.addEventListener('touchstart', (e) => { e.preventDefault(); beginTouch(); });
+  canvas.addEventListener('touchend', (e) => { e.preventDefault(); endTouch(); });
+  canvas.addEventListener('mousedown', (e) => { e.preventDefault(); beginTouch(); });
+  canvas.addEventListener('mouseup', (e) => { e.preventDefault(); endTouch(); });
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') { e.preventDefault(); beginTouch(); }
+    if (e.code === 'KeyR') resetGame();
+  });
+  window.addEventListener('keyup', (e) => { if (e.code === 'Space') endTouch(); });
+
+  // control UI
+  startBtn.addEventListener('click', () => { startGame(); });
+  resetBtn.addEventListener('click', () => { resetGame(); });
+
+  // obstacle types
+  const OB_TYPE_SOIL = 'soil'; // top+bottom with gap
+  const OB_TYPE_BONUS = 'bonus'; // open sea variety, single object
+
+  function spawnSoil() {
+    // gap y position random within range
+    const margin = Math.max(60, H*0.08);
+    const gapY = Math.max(margin + gapHeight/2, Math.min(H - margin - gapHeight/2, Math.random()*(H - margin*2) + margin + gapHeight/2));
+    obstacles.push({
+      type: OB_TYPE_SOIL,
+      x: W + OB_WIDTH,
+      width: OB_WIDTH,
+      gapY,
+      gapHeight,
+      passed: false
+    });
+  }
+
+  const BONUS_TYPES = ['bomb','island','ship','mine','military','debris'];
+  function spawnBonus() {
+    const type = BONUS_TYPES[Math.floor(Math.random()*BONUS_TYPES.length)];
+    const y = Math.random()*(H*0.75) + H*0.12;
+    obstacles.push({
+      type: OB_TYPE_BONUS,
+      kind: type,
+      x: W + 80 + Math.random()*120,
+      y,
+      size: Math.max(26, Math.min(70, H*0.065)),
+      passed: false
+    });
+  }
+
+  function update(t) {
+    if (!lastTime) lastTime = t;
+    dt = Math.min(0.05, (t - lastTime)/1000);
+    lastTime = t;
+
+    if (running && !gameOver) {
+      // speed ramps slowly with score
+      speedMultiplier = 1 + Math.min(3, score / 80);
+      speedDisplay.textContent = speedMultiplier.toFixed(2) + 'x';
+
+      // physics
+      ship.vy += gravity * dt;
+      ship.y += ship.vy * dt;
+      // clamp within screen
+      if (ship.y < 8) { ship.y = 8; ship.vy = 0; }
+      if (ship.y > H - ship.radius) { ship.y = H - ship.radius; ship.vy = 0; }
+
+      // spawn logic
+      spawnTimer += dt * speedMultiplier;
+      const currentSpawnInterval = Math.max(0.8, spawnInterval - Math.min(0.6, score/300));
+      if (!inOpenSea && spawnTimer >= currentSpawnInterval) {
+        spawnTimer = 0;
+        spawnSoil();
+      }
+      if (inOpenSea) {
+        // open sea spawns bonus obstacles more frequently
+        spawnTimer += dt * 2;
+        if (Math.random() < 0.3 * dt * 10) spawnBonus();
+      }
+
+      // update obstacles
+      const speed = scrollSpeedBase * speedMultiplier;
+      for (let i = obstacles.length-1; i >= 0; i--) {
+        const ob = obstacles[i];
+        ob.x -= speed * dt;
+        // collision detection
+        if (ob.type === OB_TYPE_SOIL) {
+          const left = ob.x;
+          const right = ob.x + ob.width;
+          // if ship passed obstacle
+          if (!ob.passed && ship.x > right) {
+            ob.passed = true;
+            if (!inOpenSea) { score += 1; totalSoilPassed += 1; playBeep(1200,0.02); }
+            // check for open sea trigger
+            if (!inOpenSea && totalSoilPassed > 0 && (totalSoilPassed % 50) === 0) {
+              enterOpenSea();
+            }
+          }
+          // top rect and bottom rect collision
+          const gapTop = ob.gapY - ob.gapHeight/2;
+          const gapBottom = ob.gapY + ob.gapHeight/2;
+          // if ship's x inside obstacle horizontal range, check vertical overlap
+          if (ship.x + ship.radius > left && ship.x - ship.radius < right) {
+            if (ship.y - ship.radius < gapTop || ship.y + ship.radius > gapBottom) {
+              triggerGameOver();
+            }
+          }
+        } else if (ob.type === OB_TYPE_BONUS) {
+          // approx circle vs circle/rect collision
+          const dx = ship.x - ob.x;
+          const dy = ship.y - ob.y;
+          const dist = Math.sqrt(dx*dx + dy*dy);
+          if (dist < ship.radius + ob.size*0.5) {
+            // colliding with bonus object -> game over (for prototype)
+            triggerGameOver();
+          }
+          // if passed to left then mark passed and maybe give bonus points if survived
+          if (!ob.passed && ob.x + ob.size < ship.x) {
+            ob.passed = true;
+            // small bonus while in open sea
+            if (inOpenSea) { score += 2; playBeep(1600,0.02); }
+          }
+        }
+
+        // remove offscreen
+        if (ob.x + (ob.width || ob.size) < -200) {
+          obstacles.splice(i,1);
+        }
+      }
+
+      // open sea timer update
+      if (inOpenSea) {
+        openSeaTimer -= dt;
+        if (openSeaTimer <= 0) {
+          exitOpenSea();
+        }
+      }
+    }
+
+    render();
+    if (!gameOver) requestAnimationFrame(update);
+  }
+
+  function render() {
+    // clear
+    ctx.clearRect(0,0,W,H);
+
+    // draw sea band at bottom
+    const seaHeight = Math.max(H*0.18, 120);
+    ctx.save();
+    // sky gradient
+    const grad = ctx.createLinearGradient(0,0,0,H);
+    grad.addColorStop(0, '#87CEEB');
+    grad.addColorStop(0.6, '#cfeef8');
+    grad.addColorStop(1, '#a6e0ff');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0,0,W,H);
+
+    // subtle waves (parallax)
+    const waveY = H - seaHeight;
+    for (let i=0;i<6;i++){
+      ctx.beginPath();
+      const amp = 6 + 3*Math.sin((Date.now()/1000)+i);
+      ctx.moveTo(0, waveY + i*6);
+      for (let x=0; x<=W; x+=10) {
+        ctx.lineTo(x, waveY + i*6 + Math.sin((x/60) + (Date.now()/2000) + i)*amp);
+      }
+      ctx.lineTo(W, H);
+      ctx.lineTo(0,H);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(28, 119, 171,' + (0.06 + i*0.02) + ')';
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // draw obstacles
+    for (const ob of obstacles) {
+      if (ob.type === OB_TYPE_SOIL) {
+        // top island/rock
+        ctx.fillStyle = '#8b5a2b';
+        ctx.fillRect(ob.x, 0, ob.width, ob.gapY - ob.gapHeight/2);
+        // bottom island
+        ctx.fillRect(ob.x, ob.gapY + ob.gapHeight/2, ob.width, H - (ob.gapY + ob.gapHeight/2) - 0);
+        // add some grassy top
+        ctx.fillStyle = '#2d8f3b';
+        const topH = Math.min(14, ob.gapY*0.12);
+        ctx.fillRect(ob.x, ob.gapY - ob.gapHeight/2 - topH, ob.width, topH);
+        ctx.fillRect(ob.x, ob.gapY + ob.gapHeight/2, ob.width, topH);
+      } else if (ob.type === OB_TYPE_BONUS) {
+        // draw different icons for bonus types
+        switch(ob.kind) {
+          case 'bomb':
+            ctx.fillStyle = '#222';
+            ctx.beginPath(); ctx.arc(ob.x, ob.y, ob.size*0.5, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = '#bdbdbd';
+            ctx.fillRect(ob.x + ob.size*0.45, ob.y - ob.size*0.6, ob.size*0.02, ob.size*0.2);
+            break;
+          case 'island':
+            ctx.fillStyle = '#8b5a2b';
+            ctx.fillRect(ob.x - ob.size*0.6, ob.y, ob.size*1.2, ob.size*0.5);
+            ctx.fillStyle = '#2d8f3b';
+            ctx.beginPath(); ctx.ellipse(ob.x, ob.y - ob.size*0.2, ob.size*0.7, ob.size*0.35,0,0,Math.PI*2); ctx.fill();
+            break;
+          case 'ship':
+            ctx.fillStyle = '#6b3e2b';
+            ctx.fillRect(ob.x - ob.size*0.6, ob.y - ob.size*0.15, ob.size*1.2, ob.size*0.4);
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(ob.x - ob.size*0.05, ob.y - ob.size*0.45, ob.size*0.12, ob.size*0.25);
+            break;
+          case 'mine':
+            ctx.fillStyle = '#333';
+            ctx.beginPath(); ctx.arc(ob.x, ob.y, ob.size*0.45, 0, Math.PI*2); ctx.fill();
+            break;
+          case 'military':
+            ctx.fillStyle = '#2b3b4f';
+            ctx.fillRect(ob.x - ob.size*0.6, ob.y - ob.size*0.2, ob.size*1.2, ob.size*0.4);
+            ctx.fillStyle = '#d1d3d4';
+            ctx.fillRect(ob.x - ob.size*0.1, ob.y - ob.size*0.65, ob.size*0.15, ob.size*0.35);
+            break;
+          case 'debris':
+            ctx.fillStyle = '#7e5a4e';
+            ctx.fillRect(ob.x - ob.size*0.45, ob.y - ob.size*0.15, ob.size*0.9, ob.size*0.3);
+            ctx.beginPath(); ctx.moveTo(ob.x - ob.size*0.25, ob.y - ob.size*0.15); ctx.lineTo(ob.x, ob.y - ob.size*0.6); ctx.lineTo(ob.x + ob.size*0.2, ob.y - ob.size*0.15); ctx.fill();
+            break;
+        }
+      }
+    }
+
+    // draw ship (simple boat)
+    ctx.save();
+    ctx.translate(ship.x, ship.y);
+    ctx.rotate(Math.max(-0.35, Math.min(0.35, ship.vy/600)));
+    // hull
+    ctx.fillStyle = '#6b3e2b';
+    ctx.beginPath();
+    ctx.moveTo(-ship.radius*1.2, ship.radius*0.2);
+    ctx.quadraticCurveTo(0, ship.radius*1.1, ship.radius*1.8, ship.radius*0.2);
+    ctx.lineTo(ship.radius*1.0, ship.radius*0.8);
+    ctx.quadraticCurveTo(0, ship.radius*1.45, -ship.radius*1.2, ship.radius*0.8);
+    ctx.closePath();
+    ctx.fill();
+    // deck
+    ctx.fillStyle = '#d9c39b';
+    ctx.fillRect(-ship.radius*0.5, -ship.radius*0.55, ship.radius*1.2, ship.radius*0.4);
+    // small cabin
+    ctx.fillStyle = '#c85d2b';
+    ctx.fillRect(ship.radius*0.1, -ship.radius*1.0, ship.radius*0.55, ship.radius*0.4);
+    ctx.restore();
+
+    // UI on canvas
+    scoreDisplay.textContent = `Skor: ${score}`;
+    subScore.textContent = `Engeller: ${totalSoilPassed} · Açık Deniz: ${openSeaCount}`;
+
+    if (!running) {
+      overlay.style.display = 'block';
+      overlayText.textContent = gameOver ? `Oyun Bitti — Skor ${score}` : 'Yardım Gemisi — Başla';
+      startBtn.textContent = gameOver ? 'Tekrar Dene' : 'Başla';
+      overlay.querySelector('#resetBtn').style.display = gameOver ? 'inline-block' : 'inline-block';
+    } else {
+      overlay.style.display = 'none';
+    }
+  }
+
+  function startGame() {
+    if (!audioCtx && audioOn) initAudio();
+    running = true;
+    gameOver = false;
+    lastTime = 0;
+    requestAnimationFrame(update);
+  }
+
+  function resetGame() {
+    running = false;
+    gameOver = false;
+    obstacles.length = 0;
+    score = 0;
+    totalSoilPassed = 0;
+    openSeaCount = 0;
+    inOpenSea = false;
+    openSeaTimer = 0;
+    ship.y = H*0.5; ship.vy = 0;
+    spawnTimer = 0;
+    overlay.style.display = 'block';
+    render();
+  }
+
+  function triggerGameOver() {
+    gameOver = true;
+    running = false;
+    playCrash();
+    // save best
+    if (score > bestScore) {
+      bestScore = score;
+      localStorage.setItem('asr_best', bestScore);
+    }
+    overlay.style.display = 'block';
+    overlayText.textContent = `Oyun Bitti — Skor ${score} · En İyi ${bestScore}`;
+  }
+
+  function enterOpenSea() {
+    inOpenSea = true;
+    openSeaTimer = OPEN_SEA_DURATION;
+    openSeaCount += 1;
+    // give a small multiplier bonus as visual
+    score += Math.floor(5 * openSeaCount);
+    playBeep(220, 0.12);
+    // make open sea visually clearer by clearing near obstacles
+    obstacles.length = 0;
+  }
+
+  function exitOpenSea() {
+    inOpenSea = false;
+    // narrow gaps slightly to increase difficulty
+    gapHeight = Math.max(110, gapHeight - 6);
+    spawnInterval = Math.max(0.9, spawnInterval - 0.02);
+    playBeep(440, 0.08);
+  }
+
+  // initial render
+  resize();
+  resetGame();
+  render();
+
+  // friendly tip: enable sound on first user gesture if needed
+  document.addEventListener('click', function one() {
+    if (!audioCtx && audioOn) initAudio();
+    document.removeEventListener('click', one);
+  });
+
+})();
+</script>
+</body>
+</html>
